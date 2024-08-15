@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+
+# === 针对 poste.io 免费版的补丁，使其成为一个适当隔离的服务 ===
+#
+# - 限制所有公共监听端口只能绑定到容器主机名相关的 IP 地址
+#
+# - 将所有本地监听端口替换为容器内的 Unix 域套接字
+#
+# 通过这些更改，可以在同一台机器上运行多个 poste.io 实例（只要每个容器有自己独立的公共 IP），并且内部服务（如配额、WebSocket 等）不会暴露给主机的回环接口。
+
+set -eu  # 遇到任何错误或未定义的变量时失败
+shopt -s nullglob
+
+# 一个用于用 sed 编辑文件的简易 DSL：`~ edit 文件...; {{ 命令 }}`
+edit() { local sed; ::block sed-dsl; if (($#)); then sed -i -e "$sed" "$@"; fi; }
+sed-dsl()    { sed."$@"; }
+sed.sub()    { sed+="s~$1~$2~${3-}"$'\n'; }
+sed.del()    { sed+="${1+/$1/}d"$'\n'; }
+sed.append() { sed+='$a'; ((!$#))||__sedline "$@"; ::block __sedline; sed+=$'\n'; }
+sed.after()  { sed+='/'"$1"'/a'; (($#<2))||__sedline "${@:2}"; ::block __sedline; sed+=$'\n'; }
+sed.range()  { sed+="/$1/,/$2/ {"$'\n'; ::block sed-dsl; sed+=$'}\n'; }
+__sedline()  { sed+="${*/#/\\$'\n'}"; }
+
+# DSL 语法宏：从 https://github.com/bashup/scale-dsl 复制的精简运行时
+shopt -q expand_aliases||{ unalias -a;shopt -s expand_aliases;};builtin alias +='{ ::__;::(){ ((!$#))||{ shift;"${__dsl__[@]-::no-dsl}" ' ~='{ ::__;::(){ ((!$#))||{ shift; ' -='"${__dsl__[@]-::no-dsl}" ' '{{=return;return;};__blk__=;set -- "${__blarg__[@]:1}"; ' '}}=};__:: 0 "$@";}';::block(){ ((!$#))||local __dsl__=("$@");${__blk__:+::};};__bsp__=0;::__(){ __bstk__[__bsp__++]="${__blk__:+__blk__=1;$(declare -f ::)}";};__::(){ local __blarg__=("$@");__blk__=1;:: "$@"||set -- $?;__blk__=;local REPLY;${__bstk__[--__bsp__]:+eval "${__bstk__[__bsp__]}"}||:;return $1;}
+
+
+# === 上游错误修复 ===
+
+# 当 2.3.x 稳定后移除此项
+~ edit opt/admin/src/AppBundle/Resources/views/Box/edit.html[.]twig; {{
+  # 修复拼写错误
+  - sub "refereneId" "referenceId"
+}}
+
+
+# === Restrict public ports to the container hostname IP ===
+
+~ edit /opt/www/webmail/config/config.inc.php; {{
+  # 使 webmail 连接到公共主机名，而不是 localhost
+  + append ""; {{
+    - "\$config['default_host'] = 'ssl://' . gethostname();"
+    - "\$config['smtp_server']  = 'tls://' . gethostname() . ':587';"
+    - "\$config['managesieve_port'] = 4190;"
+    - "\$config['managesieve_host'] = gethostname();"
+    - "\$config['managesieve_usetls'] = true;"
+  }}
+}}
+
+~ edit /healthcheck/nginx.sh; {{
+  - sub "http://127.0.0.1" '"http://$(hostname)"'
+}}
+
+
+~ edit \
+    /opt/admin/src/AppBundle/CommandInternal/DeliverQuarantineCommand[.]php \
+    /opt/admin/src/Base/CommandInternal/DeliverQuarantineCommand[.]php ;
+{{
+  # Quarantine "deliver" / deliver:quarantine 应该发送到主机，而不是 localhost
+  - sub "\['msmtp', '-f'.*" "['msmtp', '--host', gethostname(), '-f', \$meta['from']];"
+}}
+
+~ edit /etc/nginx/sites-enabled.templates/{no-,}https; {{
+  # 移除没有地址的监听行
+  - del 'listen __HTTP_PORT__;'
+  - del 'listen __HTTPS_PORT__ ssl;'
+
+  # 用显式主机替换 IPv6 通配符和任何 localhost 引用
+  - sub 'listen \[::\]:' 'listen __HOST__:'
+  - sub localhost '$hostname'
+
+  # 修改 client_max_body_size 的值
+  - sub 'client_max_body_size 100m;' 'client_max_body_size 200m;'
+}}
+
+~ edit /opt/haraka-{smtp,submission}/config/plugins; {{
+  # 当连接来自 localhost 时，伪造远程 IP 为 127.0.0.1
+  - after "status_http" \
+    "inbound_ips"
+  # 添加我们的出站 IP 路由插件
+  - append 'outbound_ips'
+}}
+
+
+# === 将 localhost 端口替换为 Unix 套接字 ====
+
+# 注意：如果你更改了这些套接字名称或位置，它们也必须在相应的文件中更改，如下：
+#
+# - files/etc/dovecot/local.conf
+# - files/etc/rspamd/override.d/worker-*.inc
+# - files/opt/haraka-smtp/config/redis.ini
+
+sockdir=/var/run
+rspam_web=$sockdir/rspamd-web.sock
+rspam=$sockdir/rspamd-normal.sock
+quota=$sockdir/dovecot-quota.sock
+
+# redis 和 haraka 以非特权用户运行，因此需要各自的目录
+mkdir -p       "$sockdir"/redis "$sockdir"/haraka
+chown redis    "$sockdir"/redis
+chown delivery "$sockdir"/haraka
+
+redis="$sockdir"/redis/redis.sock
+haraka_smtp_web=$sockdir/haraka/web-11380.sock
+haraka_sub_web=$sockdir/haraka/web-11381.sock
+
+
+# 更改 nginx 代理设置以使用 Unix 套接字
+
+~ edit /etc/nginx/sites-enabled.templates/{no-,}https; {{
+  - sub 127.0.0.1:11334 unix:"$rspam_web":
+  - sub 'proxy_pass http://127.0.0.1:\$1/' "proxy_pass http://unix:$sockdir/haraka/web-\$1.sock:/"
+}}
+
+# rspamc 命令需要显式引用 Web 套接字
+
+~ edit /opt/admin/src/AppBundle/Server/System[.]php /opt/admin/src/Base/Server/System[.]php; {{
+  - sub "rspamc stat" \
+        "rspamc -h $rspam_web stat"
+}}
+~ edit /etc/dovecot/sieve/report-{spam,ham}.sieve; {{
+  - sub '"rspamc" \[' \
+        '"rspamc" ["--connect='"$rspam_web"'", '
+}}
+
+# 禁用 localhost 上的 dovecot 配额服务
+
+~ edit /etc/dovecot/conf.d/90-quota.conf; {{
+  + range 'inet_listener' '}'; {{
+    - del
+  }}
+}}
+
+# Haraka 插件需要使用套接字而不是端口来处理配额
+
+~ edit /opt/haraka-smtp/plugins/dovecot_quota.js; {{
+  - sub "socket\\.connect(13001, '127.0.0.1');" \
+        "socket.connect('$quota');"
+}}
+
+# Haraka 日志应该显示 Redis 套接字
+~ edit /usr/lib/node_modules/Haraka/node_modules/haraka-plugin-redis/index.js; {{
+  - sub 'redis://\${opts.host}:\${opts.port}' \
+        'redis://${opts.path}'
+}}
+
+# Haraka Web 服务器需要监听 Unix 套接字
+
+~ edit /opt/haraka-smtp/config/http.ini; {{
+  - sub 'listen=127.0.0.1:11380' "listen=$haraka_smtp_web:777"
+}}
+
+~ edit /opt/haraka-submission/config/http.ini; {{
+  - sub 'listen=127.0.0.1:11381' "listen=$haraka_sub_web:777"
+}}
+
+# 让 Haraka 通过 Unix 套接字与 rspamd 通信
+
+~ edit /opt/haraka-{smtp,submission}/config/rspamd.ini; {{
+  - sub '^host.*=.*$' "unix_socket = $rspam"
+}}
+
+# 配置 Redis 监听 Unix 套接字，并让 rspamd+admin 连接到那里
+
+~ edit /etc/redis/redis.conf; {{
+  - sub "^port 6379" "port 0"  # 禁用 localhost 端口
+  - append "" "unixsocket $redis" "unixsocketperm 777"  # 自 2.3.7 起可以移除
+}}
+
+~ edit /etc/rspamd/local.d/{redis,statistic}.conf; {{
+  - sub 'servers = "127.*;$' \
+        'servers = "'"$redis"'";'
+}}
+
+~ edit /healthcheck/redis.sh; {{
+  - sub '-h "127.0.0.1"' "-s '$redis'";
+}}
+
+~ edit /bin/clear[-]idle-connections; {{  # 自 2.3.7 起可以移除
+  - sub "redis-cli'" "redis-cli', '-s', '$redis'"
+}}
+
+~ edit /bin/poste-redis-statistics; {{
+  - sub "redis-cli" "redis-cli -s '$redis'"
+}}
+
+~ edit /opt/admin/src/AppBundle/Resources/config/services[.]yml /opt/admin/config/services_base[.]yaml; {{
+  - sub '^  Predis\\Client: .*$' \
+         '  Predis\\Client: { arguments: [ "unix:'"$redis"'" ] }'
+
+  # 上述更改不会生效，除非清除服务缓存：
+  rm -rf /opt/admin/var/cache/prod
+}}
+
+# === 支持 Roundcube 插件和持久化加密密钥 ===
+
+# 从 DES_KEY 加载 48 位十六进制 des_key
+~ edit /etc/cont-init.d/{20-apply-server-config,97[-]randoms}; {{
+  + range 'roundcube' 'preg_replace'; {{
+    - sub '[$]key = bin2hex' '$key = getenv("DES_KEY") ?: bin2hex'
+  }}
+}}
+
+# 从 /data/roundcube/installed-plugins 自动加载 Roundcube 插件 修改允许的最大单邮件大小
+
+~ edit /opt/www/webmail/config/config.inc.php; {{
+  + append ""; {{
+    - 'foreach ( explode("\\n", file_get_contents("/data/roundcube/installed-plugins")) as $line ) {'
+    - '    $line = trim($line);'
+    - '    if ( "" === $line || substr($line,0,1) === "#" || ! is_dir("plugins/$line")) continue;'
+    - '    $config["plugins"][] = $line;'
+    - '}'
+  }}
+}}
+
+# 修改 RoundCube 配置
+~ edit /opt/www/webmail/config/defaults.inc.php; {{
+    - sub "\$config\['max_message_size'\] = '100M';" "\$config['max_message_size'] = '266M';"
+}}
+# 修改 php 的配置
+
+~ edit /etc/php/7.4/fpm/pool.d/www.conf; {{
+  # 修改文件上传相关配置
+  - sub 'php_admin_value\[upload_max_filesize\]=100M' 'php_admin_value[upload_max_filesize]=200M'
+  - sub 'php_admin_value\[post_max_size\]=100M' 'php_admin_value[post_max_size]=200M'
+
+  # 修改内存限制相关配置
+  - sub 'php_admin_value\[memory_limit\]=200M' 'php_admin_value[memory_limit]=400M'
+
+  # 修改最大执行时间配置
+  - sub 'php_admin_value\[max_execution_time\]=30' 'php_admin_value[max_execution_time]=300'
+}}

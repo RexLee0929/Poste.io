@@ -1,0 +1,18 @@
+services:
+  Poste.io:
+    image: poste.io:latest
+    container_name: poste
+    hostname: mail.domain.com
+    restart: always
+    network_mode: host
+    environment:
+      - LETSENCRYPT_EMAIL=admin@domain.com
+      - LETSENCRYPT_HOST=mail.domain.com
+      - VIRTUAL_HOST=mail.domain.com
+      - TZ=Asia/Shanghai
+      - HTTPS=OFF
+      - HTTP_PORT=8808 #随意修改
+      - DISABLE_CLAMAV=TRUE #禁用反病毒 如果内存小于2G建议开启 非常占内存
+    volumes:
+      - './data:/data'
+      - '/etc/localtime:/etc/localtime:ro'
