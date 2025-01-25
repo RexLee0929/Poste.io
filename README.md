@@ -1,6 +1,7 @@
 # Poste.io
+[<img src="https://api.gitsponsors.com/api/badge/img?id=842880610" height="20">](https://api.gitsponsors.com/api/badge/link?p=vGJIJQ6uMOuDRmyUuFbWO1+BgR/wdKP86GuIXulOQDAwrUWstGNRFju16jJpMsJXn7zTr6msTHgeXEu8j1bqE5ebawLZ3ukyVINNEf8gf69zB1wOgdgO89OEcRRgx7LeC07WQPBbI+QlTRbx7anGCA==)
 
-镜像构建所用到的配置文件部分来自 [dirtsimple](https://github.com/dirtsimple/poste.io) 
+配置文件部分来自 [dirtsimple](https://github.com/dirtsimple/poste.io) 
 
 
 ## Install Poste.io
