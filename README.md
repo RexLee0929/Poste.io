@@ -1,6 +1,6 @@
 # Poste.io
 
-镜像构建所用到的配置文件来自 [dirtsimple](https://github.com/dirtsimple/poste.io) 
+镜像构建所用到的配置文件部分来自 [dirtsimple](https://github.com/dirtsimple/poste.io) 
 
 
 ## Install Poste.io
