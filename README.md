@@ -3,6 +3,9 @@
 
 配置文件部分来自 [dirtsimple](https://github.com/dirtsimple/poste.io) 
 
+原项目官网 [Poste.io](https://poste.io)
+
+原项目更新日志 [Poste.io](https://poste.io/changelog)
 
 ## Install Poste.io
 
