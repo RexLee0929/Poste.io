@@ -8,6 +8,11 @@
 #
 # 通过这些更改，可以在同一台机器上运行多个 poste.io 实例（只要每个容器有自己独立的公共 IP），并且内部服务（如配额、WebSocket 等）不会暴露给主机的回环接口。
 
+
+PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+PHP_POOL_CONF="/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
+
+
 set -eu  # 遇到任何错误或未定义的变量时失败
 shopt -s nullglob
 
@@ -219,14 +224,16 @@ haraka_sub_web=$sockdir/haraka/web-11381.sock
 }}
 # 修改 php 的配置
 
-~ edit /etc/php/7.4/fpm/pool.d/www.conf; {{
+if [ -f "$PHP_POOL_CONF" ]; then
+  ~ edit "$PHP_POOL_CONF"; {{
   # 修改文件上传相关配置
-  - sub 'php_admin_value\[upload_max_filesize\]=100M' 'php_admin_value[upload_max_filesize]=200M'
-  - sub 'php_admin_value\[post_max_size\]=100M' 'php_admin_value[post_max_size]=200M'
-
+    - sub 'php_admin_value\[upload_max_filesize\]=100M' 'php_admin_value[upload_max_filesize]=200M'
+    - sub 'php_admin_value\[post_max_size\]=100M' 'php_admin_value[post_max_size]=200M'
   # 修改内存限制相关配置
-  - sub 'php_admin_value\[memory_limit\]=200M' 'php_admin_value[memory_limit]=400M'
-
+    - sub 'php_admin_value\[memory_limit\]=200M' 'php_admin_value[memory_limit]=400M'
   # 修改最大执行时间配置
-  - sub 'php_admin_value\[max_execution_time\]=30' 'php_admin_value[max_execution_time]=300'
-}}
+    - sub 'php_admin_value\[max_execution_time\]=30' 'php_admin_value[max_execution_time]=300'
+  }}
+else
+  echo "警告：在 $PHP_POOL_CONF 处未找到 PHP 池配置，跳过 PHP 调整..."
+fi
